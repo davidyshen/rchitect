@@ -4,42 +4,86 @@
 #include <stdio.h>
 
 #ifndef _WIN32
-    #include <unistd.h>  // for getpid
+#include <unistd.h> // for getpid
 #endif
 
-static void* libR_t;
+#ifdef _WIN32
+#include <windows.h>          // for IsWow64Process2 to check Windows on Arm emulation
+#define IS_ARM64_VALUE 0xaa64 // Define the ARM64 value returned from IsWow64Process2
+
+BOOL is_arm64_native()
+{
+    USHORT processMachine = PROCESSOR_ARCHITECTURE_UNKNOWN;
+    USHORT nativeMachine = PROCESSOR_ARCHITECTURE_UNKNOWN;
+    HANDLE currentProcess = GetCurrentProcess();
+    typedef BOOL(WINAPI * LPFN_ISWOW64PROCESS2)(HANDLE, PUSHORT, PUSHORT);
+    LPFN_ISWOW64PROCESS2 IsWow64Process2 = (LPFN_ISWOW64PROCESS2)GetProcAddress(GetModuleHandleA("kernel32.dll"), "IsWow64Process2");
+
+    if (IsWow64Process2 != NULL)
+    {
+        if (!IsWow64Process2(currentProcess, &processMachine, &nativeMachine))
+        {
+            // Handle the error as needed
+            return FALSE; // Or another appropriate default
+        }
+        if (nativeMachine == IS_ARM64_VALUE)
+        {
+            // Check if the R-aarch64 directory exists
+            if (directory_exists("C:\\Program Files\\R-aarch64"))
+            {
+                printf("Using R on ARM64 for Windows\n");
+                return TRUE;
+            }
+        }
+    }
+    return FALSE; // If IsWow64Process2 is not available, assume not ARM64 or directory doesn't exist
+}
+
+BOOL directory_exists(const char *path)
+{
+    DWORD attributes = GetFileAttributesA(path);
+    return (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY));
+}
+#endif
+
+static void *libR_t;
 
 static char last_loaded_symbol[100] = "";
 
-char* _libR_last_loaded_symbol() {
+char *_libR_last_loaded_symbol()
+{
     return last_loaded_symbol;
 }
 
 static char dl_error_message[1024] = "";
 
-char* _libR_dl_error_message() {
+char *_libR_dl_error_message()
+{
 #ifdef _WIN32
     LPVOID lpMsgBuf;
     DWORD dw = GetLastError();
 
     DWORD length = FormatMessage(
         FORMAT_MESSAGE_ALLOCATE_BUFFER |
-        FORMAT_MESSAGE_FROM_SYSTEM |
-        FORMAT_MESSAGE_IGNORE_INSERTS,
+            FORMAT_MESSAGE_FROM_SYSTEM |
+            FORMAT_MESSAGE_IGNORE_INSERTS,
         NULL,
         dw,
         MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
-        (LPTSTR) &lpMsgBuf,
-        0, NULL );
+        (LPTSTR)&lpMsgBuf,
+        0, NULL);
 
-    if (length != 0) {
+    if (length != 0)
+    {
         strcpy(dl_error_message, lpMsgBuf);
         LocalFree(lpMsgBuf);
-    } else {
+    }
+    else
+    {
         strcpy(dl_error_message, "(Unknown error)");
     }
 #else
-    char* msg = dlerror();
+    char *msg = dlerror();
     if (msg != NULL)
         strcpy(dl_error_message, msg);
     else
@@ -48,112 +92,146 @@ char* _libR_dl_error_message() {
     return dl_error_message;
 }
 
-
-static int load_symbol(void* lib_t, const char* name, void** symbol_t, int unwrap) {
-    void** temp;
+static int load_symbol(void *lib_t, const char *name, void **symbol_t, int unwrap)
+{
+    void **temp;
     strcpy(last_loaded_symbol, name);
 #ifdef _WIN32
-    temp = (void**) GetProcAddress((HINSTANCE) lib_t, name);
+    temp = (void **)GetProcAddress((HINSTANCE)lib_t, name);
 #else
-    temp = (void**) dlsym(lib_t, name);
+    temp = (void **)dlsym(lib_t, name);
 #endif
-    if (temp == NULL) {
+    if (temp == NULL)
+    {
         return 0;
-    } else {
-        if (unwrap) {
+    }
+    else
+    {
+        if (unwrap)
+        {
             *symbol_t = *temp;
-        } else {
-            *symbol_t = (void *) temp;
+        }
+        else
+        {
+            *symbol_t = (void *)temp;
         }
         return 1;
     }
 }
 
+#define LOAD_SYMBOL_AS(name, as)                      \
+    if (!load_symbol(libR_t, #name, (void **)&as, 0)) \
+        return 0;
 
-#define LOAD_SYMBOL_AS(name, as) \
-if (!load_symbol(libR_t, #name, (void**) &as, 0)) \
-    return 0;
+#define LOAD_SYMBOL(name)                               \
+    if (!load_symbol(libR_t, #name, (void **)&name, 0)) \
+    {                                                   \
+        return 0;                                       \
+    }
 
-#define LOAD_SYMBOL(name) \
-if (!load_symbol(libR_t, #name, (void**) &name, 0)) {\
-    return 0; \
-}
+#define LOAD_CONSTANT_AS(name, as)                    \
+    if (!load_symbol(libR_t, #name, (void **)&as, 1)) \
+        return 0;
 
-#define LOAD_CONSTANT_AS(name, as) \
-if (!load_symbol(libR_t, #name, (void**) &as, 1)) \
-    return 0;
-
-#define LOAD_CONSTANT(name) \
-if (!load_symbol(libR_t, #name, (void**) &name, 1)) \
-    return 0;
-
+#define LOAD_CONSTANT(name)                             \
+    if (!load_symbol(libR_t, #name, (void **)&name, 1)) \
+        return 0;
 
 #ifdef _WIN32
 
-static void* libRga_t;
+static void *libRga_t;
 
-#define LOAD_GA_SYMBOL(name) \
-if (!load_symbol(libRga_t, #name, (void**) &name, 0)) {\
-    return 0; \
-}
+#define LOAD_GA_SYMBOL(name)                              \
+    if (!load_symbol(libRga_t, #name, (void **)&name, 0)) \
+    {                                                     \
+        return 0;                                         \
+    }
 
-#define LOAD_WIN_DLL(name) \
-if (sizeof(void*) == 8) { \
-    sprintf(libpath, "%s\\%s\\%s", rhome, "bin\\x64", #name); \
-} else { \
-    sprintf(libpath, "%s\\%s\\%s", rhome, "bin\\i386", #name); \
-} \
-if ((void*)load_dll(libpath) == NULL) { \
-    free(libpath); \
-    return 0; \
-}
+#define LOAD_WIN_DLL(name)                                         \
+    if (is_arm64_native())                                         \
+    {                                                              \
+        sprintf(libpath, "%s\\%s\\%s", rhome, "bin", #name);       \
+    }                                                              \
+    else if (sizeof(void *) == 8)                                  \
+    {                                                              \
+        sprintf(libpath, "%s\\%s\\%s", rhome, "bin\\x64", #name);  \
+    }                                                              \
+    else                                                           \
+    {                                                              \
+        sprintf(libpath, "%s\\%s\\%s", rhome, "bin\\i386", #name); \
+    }                                                              \
+    if ((void *)load_dll(libpath) == NULL)                         \
+    {                                                              \
+        free(libpath);                                             \
+        return 0;                                                  \
+    }
 
-void* load_dll(char* libpath) {
-    void* lib_t;
+void *load_dll(char *libpath)
+{
+    void *lib_t;
     // it is needed for microsoft store python
     // LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
-    lib_t = (void*)LoadLibraryEx(libpath, NULL, 0x00001100);
-    if (lib_t == NULL) {
+    lib_t = (void *)LoadLibraryEx(libpath, NULL, 0x00001100);
+    if (lib_t == NULL)
+    {
         // fallback to the default flag (needed for conda's R)
-        lib_t = (void*)LoadLibraryEx(libpath, NULL, 0);
+        lib_t = (void *)LoadLibraryEx(libpath, NULL, 0);
     }
     return lib_t;
 }
 
 #endif
 
-int _libR_load(const char* rhome) {
-    char* libpath = malloc(strlen(rhome) + 50);
+int _libR_load(const char *rhome)
+{
+    char *libpath = malloc(strlen(rhome) + 50);
 
     libR_t = NULL;
 #ifdef _WIN32
-    if (sizeof(void*) == 8) {
+    if (is_arm64_native())
+    {
+        sprintf(libpath, "%s\\%s", rhome, "bin\\R.dll");
+    }
+    else if (sizeof(void *) == 8)
+    {
         sprintf(libpath, "%s\\%s", rhome, "bin\\x64\\R.dll");
-    } else {
+    }
+    else
+    {
         sprintf(libpath, "%s\\%s", rhome, "bin\\i386\\R.dll");
     }
+    printf("Loading %s\n", libpath);
     libR_t = load_dll(libpath);
 #elif defined(__APPLE__)
     sprintf(libpath, "%s/%s", rhome, "lib/libR.dylib");
-    libR_t = dlopen(libpath, RTLD_NOW|RTLD_GLOBAL);
+    libR_t = dlopen(libpath, RTLD_NOW | RTLD_GLOBAL);
 #else
     sprintf(libpath, "%s/%s", rhome, "lib/libR.so");
-    libR_t = dlopen(libpath, RTLD_NOW|RTLD_GLOBAL);
+    libR_t = dlopen(libpath, RTLD_NOW | RTLD_GLOBAL);
 #endif
-    if (libR_t == NULL) {
+    if (libR_t == NULL)
+    {
         free(libpath);
         return 0;
     }
 
 #ifdef _WIN32
     libRga_t = NULL;
-    if (sizeof(void*) == 8) {
+    if (is_arm64_native())
+    {
+        sprintf(libpath, "%s\\%s", rhome, "bin\\Rgraphapp.dll");
+    }
+    else if (sizeof(void *) == 8)
+    {
         sprintf(libpath, "%s\\%s", rhome, "bin\\x64\\Rgraphapp.dll");
-    } else {
+    }
+    else
+    {
         sprintf(libpath, "%s\\%s", rhome, "bin\\i386\\Rgraphapp.dll");
     }
     libRga_t = load_dll(libpath);
-    if (libRga_t == NULL) {
+    if (libRga_t == NULL)
+    {
         free(libpath);
         return 0;
     }
@@ -167,16 +245,18 @@ int _libR_load(const char* rhome) {
     return 1;
 }
 
-
-int _libR_is_initialized(void) {
-    void* p;
-    if (libR_t == NULL) return 0;
-    if (!load_symbol(libR_t, "R_GlobalEnv", (void**) &p, 1)) return 0;
+int _libR_is_initialized(void)
+{
+    void *p;
+    if (libR_t == NULL)
+        return 0;
+    if (!load_symbol(libR_t, "R_GlobalEnv", (void **)&p, 1))
+        return 0;
     return p != NULL;
 }
 
-
-int _libR_load_symbols() {
+int _libR_load_symbols()
+{
     LOAD_SYMBOL(R_CHAR);
     LOAD_SYMBOL(Rf_isNull);
     LOAD_SYMBOL(Rf_isSymbol);
@@ -533,31 +613,32 @@ int _libR_load_symbols() {
     LOAD_SYMBOL(R_getEmbeddingDllInfo);
     LOAD_SYMBOL(R_registerRoutines);
 
-    #ifdef _WIN32
+#ifdef _WIN32
     LOAD_SYMBOL(get_R_HOME)
     LOAD_SYMBOL(getRUser)
     LOAD_SYMBOL_AS(UserBreak, UserBreak_t)
     LOAD_SYMBOL_AS(CharacterMode, CharacterMode_t)
-    if (!load_symbol(libR_t, "EmitEmbeddedUTF8", (void**) &EmitEmbeddedUTF8_t, 0)) {
+    if (!load_symbol(libR_t, "EmitEmbeddedUTF8", (void **)&EmitEmbeddedUTF8_t, 0))
+    {
         EmitEmbeddedUTF8_t = NULL;
     }
-    #else
+#else
     LOAD_SYMBOL(R_checkActivity)
     LOAD_SYMBOL(R_runHandlers)
     LOAD_SYMBOL_AS(R_PolledEvents, R_PolledEvents_t)
     LOAD_SYMBOL_AS(R_interrupts_pending, R_interrupts_pending_t)
-    #endif
+#endif
 
-
-    #ifdef _WIN32
+#ifdef _WIN32
     LOAD_GA_SYMBOL(GA_peekevent);
     LOAD_GA_SYMBOL(GA_initapp);
-    #endif
+#endif
 
     return 1;
 }
 
-int _libR_load_constants() {
+int _libR_load_constants()
+{
     // these constants could be only loaded after R has initialized.
     LOAD_CONSTANT(R_GlobalEnv);
     LOAD_CONSTANT(R_EmptyEnv);
@@ -617,19 +698,22 @@ int _libR_load_constants() {
     // LOAD_CONSTANT(R_NaReal);
     // LOAD_CONSTANT(R_NaInt);
 
-    #if !defined(_WIN32)
+#if !defined(_WIN32)
     LOAD_CONSTANT(R_InputHandlers)
-    #endif
+#endif
 
     return 1;
 }
 
-
-void _libR_set_callback(char* name, void* cb) {
-    void** p;
-    if (load_symbol(libR_t, name, (void**) &p, 0)) {
+void _libR_set_callback(char *name, void *cb)
+{
+    void **p;
+    if (load_symbol(libR_t, name, (void **)&p, 0))
+    {
         *p = cb;
-    } else {
+    }
+    else
+    {
         printf("error setting callback of %s\n", name);
     }
 }
@@ -637,7 +721,8 @@ void _libR_set_callback(char* name, void* cb) {
 int xptr_callback_error_occured;
 char xptr_callback_error_message[100];
 
-SEXP _libR_xptr_callback(SEXP exptr, SEXP arglist, SEXP asis, SEXP convert) {
+SEXP _libR_xptr_callback(SEXP exptr, SEXP arglist, SEXP asis, SEXP convert)
+{
     SEXP result;
     xptr_callback_error_occured = 0;
     Rf_protect(exptr);
@@ -646,42 +731,45 @@ SEXP _libR_xptr_callback(SEXP exptr, SEXP arglist, SEXP asis, SEXP convert) {
     Rf_protect(convert);
     result = xptr_callback(exptr, arglist, asis, convert);
     Rf_unprotect(4);
-    if (xptr_callback_error_occured == 1) {
+    if (xptr_callback_error_occured == 1)
+    {
         Rf_error("%s", xptr_callback_error_message);
     }
     return result;
 }
 
 static const R_CallMethodDef CallEntries[] = {
-    {"_libR_xptr_callback", (DL_FUNC) &_libR_xptr_callback, 4},
-    {NULL, NULL, 0}
-};
+    {"_libR_xptr_callback", (DL_FUNC)&_libR_xptr_callback, 4},
+    {NULL, NULL, 0}};
 
-void _libR_setup_xptr_callback() {
-    DllInfo* dll = R_getEmbeddingDllInfo();
-    R_registerRoutines(dll, NULL, (void*) CallEntries, NULL, NULL);
+void _libR_setup_xptr_callback()
+{
+    DllInfo *dll = R_getEmbeddingDllInfo();
+    R_registerRoutines(dll, NULL, (void *)CallEntries, NULL, NULL);
 }
-
 
 #ifndef _WIN32
 int main_id = -1;
 #endif
 
-
 int cb_interrupted;
 
 // we need to wrap cb_read_console to make it KeyboardInterrupt aware
-int cb_read_console_interruptible(const char * p, unsigned char * buf, int buflen, int add_history) {
+int cb_read_console_interruptible(const char *p, unsigned char *buf, int buflen, int add_history)
+{
     // flush buffered stdio
     fflush(NULL);
 #ifndef _WIN32
-    if (main_id == -1) main_id = getpid();
-    if (getpid() != main_id) abort();
+    if (main_id == -1)
+        main_id = getpid();
+    if (getpid() != main_id)
+        abort();
 #endif
     int ret;
     cb_interrupted = 0;
     ret = cb_read_console(p, buf, buflen, add_history);
-    if (cb_interrupted == 1) {
+    if (cb_interrupted == 1)
+    {
         cb_interrupted = 0;
 #ifdef _WIN32
         *UserBreak_t = 1;
@@ -693,14 +781,17 @@ int cb_read_console_interruptible(const char * p, unsigned char * buf, int bufle
     return ret;
 }
 
-
-void cb_polled_events_interruptible() {
+void cb_polled_events_interruptible()
+{
 #ifndef _WIN32
-    if (main_id == -1) main_id = getpid();
-    if (getpid() != main_id) return;
+    if (main_id == -1)
+        main_id = getpid();
+    if (getpid() != main_id)
+        return;
 #endif
     cb_polled_events();
-    if (cb_interrupted == 1) {
+    if (cb_interrupted == 1)
+    {
         cb_interrupted = 0;
 #ifdef _WIN32
         *UserBreak_t = 1;
@@ -711,45 +802,56 @@ void cb_polled_events_interruptible() {
     }
 }
 
-
 #ifdef _WIN32
 
 // actually we don't use it
-void cb_write_console_safe(const char* s, int bufline, int otype) {
+void cb_write_console_safe(const char *s, int bufline, int otype)
+{
     cb_write_console_capturable(s, bufline, otype);
 }
 
 // actually we don't use it
-void cb_busy_safe(int which) {
+void cb_busy_safe(int which)
+{
     cb_busy(which);
 }
 
-
 #else
 
-void cb_write_console_safe(const char* s, int bufline, int otype) {
+void cb_write_console_safe(const char *s, int bufline, int otype)
+{
     // TODO: is it possible to capture the output of forks?
 
-    if (main_id == -1) main_id = getpid();
+    if (main_id == -1)
+        main_id = getpid();
     // only capture the main process
-    if (getpid() == main_id) {
+    if (getpid() == main_id)
+    {
         // flush buffered stdio
         fflush(NULL);
         cb_write_console_capturable(s, bufline, otype);
-    } else {
-        if (otype == 0) {
+    }
+    else
+    {
+        if (otype == 0)
+        {
             printf("%s", s);
             fflush(stdout);
-        } else {
+        }
+        else
+        {
             fprintf(stderr, "%s", s);
             fflush(stderr);
         }
     }
 }
 
-void cb_busy_safe(int which) {
-    if (main_id == -1) main_id = getpid();
-    if (getpid() != main_id) return;
+void cb_busy_safe(int which)
+{
+    if (main_id == -1)
+        main_id = getpid();
+    if (getpid() != main_id)
+        return;
     cb_busy(which);
 }
 
